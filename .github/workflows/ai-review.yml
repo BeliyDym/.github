@@ -284,8 +284,11 @@ jobs:
           # Anthropic keys
           sed -i 's/sk-ant-[a-zA-Z0-9_-]\{20,\}/[REDACTED_ANTHROPIC_KEY]/g' /tmp/patch.txt
 
-          # GitHub tokens
+          # GitHub tokens (classic: ghp_/gho_/ghu_/ghs_/ghr_)
           sed -i 's/gh[pousr]_[a-zA-Z0-9]\{36,\}/[REDACTED_GITHUB_TOKEN]/g' /tmp/patch.txt
+
+          # GitHub fine-grained PATs (github_pat_ prefix — distinct format)
+          sed -i 's/github_pat_[a-zA-Z0-9_]\{22,\}/[REDACTED_GITHUB_TOKEN]/g' /tmp/patch.txt
 
           # Stripe keys
           sed -i 's/[sp]k_\(live\|test\)_[a-zA-Z0-9]\{24,\}/[REDACTED_STRIPE_KEY]/g' /tmp/patch.txt
@@ -583,12 +586,28 @@ jobs:
               labels.push('partial-review');
             }
 
-            // Apply labels
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: parseInt(prNumber),
-              labels: labels
-            });
+            // Apply labels. addLabels auto-creates missing labels in most
+            // cases, but on freshly-onboarded repos a batch can still 404 if
+            // any single label is unknown. Fall back to per-label adds so one
+            // unknown label never aborts the batch and fails the run after the
+            // review comment already posted (fail-closed must end cleanly).
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: parseInt(prNumber),
+                labels: labels
+              });
+            } catch (e) {
+              console.log(`Batch addLabels failed (${e.message}); retrying per-label`);
+              for (const name of labels) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: parseInt(prNumber),
+                  labels: [name]
+                }).catch((err) => console.log(`Could not apply label '${name}': ${err.message}`));
+              }
+            }
 
             console.log(`Applied labels: ${labels.join(', ')}`);

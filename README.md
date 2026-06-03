@@ -124,7 +124,8 @@ closed rather than erroring at the call boundary).
 The reusable workflow preserves, from FE8's reference `fe8-review-bot.yml`:
 
 - **Secret redaction** before any AI call — 8 regex families
-  (OpenAI / Anthropic / GitHub / Stripe / Supabase-JWT / AWS / PEM / hex).
+  (OpenAI / Anthropic / GitHub [classic `gh*_` **and** fine-grained
+  `github_pat_`] / Stripe / Supabase-JWT / AWS / PEM / hex).
 - **Sensitive-file denylist** — touching `.env`/`.pem`/`secrets/`/etc. skips the
   AI entirely and forces HIGH.
 - **Fail-closed** — API error, parse failure, OR missing key → HIGH +
