@@ -422,9 +422,21 @@ jobs:
 
           if [ "$CURL_EXIT" -ne 0 ] || [ "$HTTP_CODE" != "200" ]; then
             echo "::error::API request failed. HTTP: $HTTP_CODE, curl exit: $CURL_EXIT"
-            echo "::warning::Response (first 500 chars): $(head -c 500 /tmp/api_response.json)"
+            # Write the fail-closed result FIRST, before any fragile diagnostic.
+            # On a transport-layer failure (DNS/TLS/timeout, HTTP 000) curl's
+            # -o file may be absent, so a `head /tmp/api_response.json` here
+            # would exit nonzero under `set -e` and abort the step BEFORE the
+            # HIGH fallback is written — skipping the fail-closed comment/labels
+            # (silent-pass via job failure). Order matters: fallback then debug.
             echo '{"risk":"HIGH","summary":"AI review failed - API error","issues":["API request failed - check workflow logs"],"recommendation":"REQUEST_CHANGES"}' > /tmp/review.json
             echo "parse_failed=true" >> $GITHUB_OUTPUT
+            # Best-effort diagnostic only — guarded so a missing or unreadable
+            # response file can never abort the step now that the fallback is set.
+            if [ -f /tmp/api_response.json ]; then
+              echo "::warning::Response (first 500 chars): $(head -c 500 /tmp/api_response.json 2>/dev/null || true)"
+            else
+              echo "::warning::No response body written by curl (transport-layer failure)."
+            fi
           else
             RESPONSE=$(cat /tmp/api_response.json)
             # Non-fatal jq extraction (survives set -e if response is not JSON)
