@@ -128,12 +128,16 @@ The reusable workflow preserves, from FE8's reference `fe8-review-bot.yml`:
   `github_pat_`] / Stripe / Supabase-JWT / AWS / PEM / hex).
 - **Sensitive-file denylist** — touching `.env`/`.pem`/`secrets/`/etc. skips the
   AI entirely and forces HIGH.
-- **Fail-closed** — API error, parse failure, OR missing key → HIGH +
-  `needs-human-review`. Never silent-pass.
+- **Fail-closed** — API error, parse failure, missing key, OR a response whose
+  `risk` is not exactly `HIGH`/`MEDIUM`/`LOW` → HIGH + `needs-human-review`.
+  Never silent-pass (a malformed-but-valid-JSON response cannot downgrade to
+  `risk:low`).
 - **Anti-spoof** — only a comment authored by `github-actions[bot]` carrying
   this repo's marker is updated; otherwise a fresh comment is posted.
 - **Label hygiene** — stale `risk:*` / `needs-*` / `partial-review` labels are
-  stripped before fresh labels are applied.
+  stripped before fresh labels are applied. Managed labels are **auto-created**
+  (idempotent `createLabel`) on first run, so a freshly-onboarded repo needs no
+  manual label setup and never ends red on a missing label.
 
 ---
 

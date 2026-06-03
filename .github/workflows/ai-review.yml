@@ -428,12 +428,19 @@ jobs:
               ')
             fi
 
-            # Final parse check with debug logging
-            if [ -z "$REVIEW" ] || ! echo "$REVIEW" | jq -e . >/dev/null 2>&1; then
-              echo "::error::AI review parse failed after extraction attempts"
+            # Final parse check with debug logging.
+            # Fail-closed requires BOTH valid JSON AND a valid risk enum: a
+            # syntactically-valid response that omits `risk` or returns a
+            # non-canonical value (e.g. lowercase "high") would otherwise pass
+            # this gate and silently fall through to risk:low in PHASE 7,
+            # bypassing fail-closed. Require risk ∈ {HIGH,MEDIUM,LOW} exactly.
+            if [ -z "$REVIEW" ] \
+              || ! echo "$REVIEW" | jq -e . >/dev/null 2>&1 \
+              || ! echo "$REVIEW" | jq -e '.risk == "HIGH" or .risk == "MEDIUM" or .risk == "LOW"' >/dev/null 2>&1; then
+              echo "::error::AI review parse failed or risk enum invalid after extraction attempts"
               echo "::warning::Extracted REVIEW (first 200 chars): $(echo "$REVIEW" | head -c 200)"
               echo "::warning::Raw API response (first 500 chars): $(echo "$RESPONSE" | head -c 500)"
-              echo '{"risk":"HIGH","summary":"AI review failed - manual review required","issues":["Parse error - check workflow logs"],"recommendation":"REQUEST_CHANGES"}' > /tmp/review.json
+              echo '{"risk":"HIGH","summary":"AI review failed - manual review required","issues":["Parse error or invalid risk enum - check workflow logs"],"recommendation":"REQUEST_CHANGES"}' > /tmp/review.json
               echo "parse_failed=true" >> $GITHUB_OUTPUT
             else
               echo "$REVIEW" > /tmp/review.json
@@ -586,28 +593,41 @@ jobs:
               labels.push('partial-review');
             }
 
-            // Apply labels. addLabels auto-creates missing labels in most
-            // cases, but on freshly-onboarded repos a batch can still 404 if
-            // any single label is unknown. Fall back to per-label adds so one
-            // unknown label never aborts the batch and fails the run after the
-            // review comment already posted (fail-closed must end cleanly).
-            try {
-              await github.rest.issues.addLabels({
+            // Ensure every managed label EXISTS before applying it. GitHub's
+            // add-labels endpoint does not reliably auto-create labels (the
+            // behavior is undocumented and a missing label can 404/422), so on
+            // a freshly-onboarded repo addLabels would fail AFTER the review
+            // comment already posted — leaving the PR unlabeled and the run
+            // red. Idempotently createLabel first (swallow "already_exists"),
+            // then apply. This makes labeling deterministic regardless of the
+            // endpoint's auto-create behavior, satisfying fail-closed-but-clean.
+            const LABEL_COLORS = {
+              'risk:high': 'b60205',
+              'risk:medium': 'fbca04',
+              'risk:low': '0e8a16',
+              'needs-human-review': 'd93f0b',
+              'needs-bugfix-ledger': '5319e7',
+              'partial-review': 'c5def5',
+            };
+            for (const name of labels) {
+              await github.rest.issues.createLabel({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: parseInt(prNumber),
-                labels: labels
+                name: name,
+                color: LABEL_COLORS[name] || 'ededed'
+              }).catch((err) => {
+                // 422 = label already exists: expected, ignore. Anything else: log.
+                if (err.status !== 422) {
+                  console.log(`createLabel('${name}') failed: ${err.message}`);
+                }
               });
-            } catch (e) {
-              console.log(`Batch addLabels failed (${e.message}); retrying per-label`);
-              for (const name of labels) {
-                await github.rest.issues.addLabels({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: parseInt(prNumber),
-                  labels: [name]
-                }).catch((err) => console.log(`Could not apply label '${name}': ${err.message}`));
-              }
             }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: parseInt(prNumber),
+              labels: labels
+            }).catch((err) => console.log(`addLabels failed: ${err.message}`));
 
             console.log(`Applied labels: ${labels.join(', ')}`);
