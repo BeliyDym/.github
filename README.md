@@ -125,13 +125,29 @@ The reusable workflow preserves, from FE8's reference `fe8-review-bot.yml`:
 
 - **Secret redaction** before any AI call — 8 regex families
   (OpenAI / Anthropic / GitHub [classic `gh*_` **and** fine-grained
-  `github_pat_`] / Stripe / Supabase-JWT / AWS / PEM / hex).
+  `github_pat_`] / Stripe / Supabase-JWT [full `header.payload.signature`, not
+  just the header] / AWS / PEM [the **whole** `BEGIN…END` block incl. the base64
+  body, not just the marker lines] / hex). This regex sieve is **defense-in-depth,
+  not a guarantee** — the **sensitive-file denylist below is the real backstop**.
+  A novel secret format the regexes don't yet cover can still slip through; that
+  is an accepted residual risk, mitigated by the denylist + fail-closed posture.
 - **Sensitive-file denylist** — touching `.env`/`.pem`/`secrets/`/etc. skips the
-  AI entirely and forces HIGH.
+  AI entirely and forces HIGH. This is the primary secret-leak control; redaction
+  is the secondary net for secrets pasted into otherwise-innocent paths.
+- **No script injection** — every dynamic value (`github.ref_name`, repo name,
+  `inputs.*`, diffstat, PR number) is routed through a step `env:` block and read
+  as `$VAR` / `process.env`, never interpolated as `${{ }}` into `run:` shell text
+  or `actions/github-script` JS source. An attacker-named branch (`fix/$(id)`) or
+  changed-file path (`$(id).txt`) cannot execute in the runner (CWE-94), which
+  matters because `ANTHROPIC_API_KEY` is in scope.
 - **Fail-closed** — API error, parse failure, missing key, OR a response whose
   `risk` is not exactly `HIGH`/`MEDIUM`/`LOW` → HIGH + `needs-human-review`.
   Never silent-pass (a malformed-but-valid-JSON response cannot downgrade to
   `risk:low`).
+- **Bugfix ledger gate** — on `fix/*` branches (when `enforce_bugfix_ledger`),
+  the changed-file list must contain the root `BUGFIXES.md` **exactly** (anchored,
+  `.` escaped); a decoy like `docs/BUGFIXES.md.bak` does **not** satisfy it and the
+  review is forced HIGH + `needs-bugfix-ledger`.
 - **Anti-spoof** — only a comment authored by `github-actions[bot]` carrying
   this repo's marker is updated; otherwise a fresh comment is posted.
 - **Label hygiene** — stale `risk:*` / `needs-*` / `partial-review` labels are

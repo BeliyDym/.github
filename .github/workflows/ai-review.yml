@@ -252,8 +252,13 @@ jobs:
           if [[ "$BRANCH" == fix/* ]]; then
             echo "is_bugfix=true" >> $GITHUB_OUTPUT
 
-            # Only enforce the ledger when the caller opted in
-            if [ "$ENFORCE_LEDGER" = "true" ] && ! grep -q "BUGFIXES.md" /tmp/files.txt; then
+            # Only enforce the ledger when the caller opted in. Match the repo
+            # ledger path EXACTLY (anchored, '.' escaped): an unanchored
+            # "BUGFIXES.md" would treat docs/BUGFIXES.md.bak or
+            # src/BUGFIXES.md.fixture as satisfying the gate and let a fix/*
+            # branch dodge the forced-HIGH review. The convention is the root
+            # BUGFIXES.md, so anchor to a whole-line match.
+            if [ "$ENFORCE_LEDGER" = "true" ] && ! grep -qx 'BUGFIXES\.md' /tmp/files.txt; then
               echo "ledger_missing=true" >> $GITHUB_OUTPUT
 
               # Force HIGH risk review.json
@@ -313,9 +318,15 @@ jobs:
           # AWS access keys
           sed -i 's/AKIA[A-Z0-9]\{16\}/[REDACTED_AWS_ACCESS_KEY]/g' /tmp/patch.txt
 
-          # Private key blocks (PEM format)
-          sed -i 's/-----BEGIN [A-Z ]*PRIVATE KEY-----/[REDACTED_PRIVATE_KEY_BEGIN]/g' /tmp/patch.txt
-          sed -i 's/-----END [A-Z ]*PRIVATE KEY-----/[REDACTED_PRIVATE_KEY_END]/g' /tmp/patch.txt
+          # Private key blocks (PEM format). Replacing only the BEGIN/END
+          # marker lines would leave the base64 key body intact between them,
+          # which still leaks the secret to the AI call. Collapse the WHOLE
+          # block (markers + body, across lines) to a single token via a sed
+          # range. The backslash-newline form of the `c` command is used (not
+          # the one-line `c\TEXT`) because the inline form is GNU-only; this
+          # form is portable across GNU (the runner) and BSD sed.
+          sed -i -E '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/c\
+          [REDACTED_PRIVATE_KEY_BLOCK]' /tmp/patch.txt
 
           # Conservative hex token fallback (32-64 lowercase hex)
           sed -i 's/\b[a-f0-9]\{32,64\}\b/[REDACTED_HEX_TOKEN]/g' /tmp/patch.txt
