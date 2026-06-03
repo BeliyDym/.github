@@ -53,10 +53,14 @@ on:
         required: false
         default: true
       model:
-        description: 'Anthropic model id for the review call.'
+        description: 'Anthropic model id for the review call. Default is the current Sonnet (claude-sonnet-4-6). Do not pin a dated snapshot here as the fleet default — a retired snapshot would make every consuming repo hit the API-error path and force HIGH, disabling the reviewer fleet-wide.'
         type: string
         required: false
-        default: 'claude-sonnet-4-20250514'
+        # claude-sonnet-4-6 is the current, non-deprecated Sonnet. The previous
+        # default (claude-sonnet-4-20250514, inherited from FE8) is on
+        # Anthropic's deprecation schedule (retires 2026-06-15); after that,
+        # every repo on the default would fail the call and fail closed to HIGH.
+        default: 'claude-sonnet-4-6'
       max_tokens:
         description: 'max_tokens for the Anthropic call.'
         type: number

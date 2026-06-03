@@ -111,7 +111,7 @@ was previously installed.
 | `project_label` | repo name | Always set it to a human label for a better review prompt |
 | `bot_marker` | `<!-- AI_REVIEW_BOT_<REPO>_v1 -->` | Rarely — only if a repo needs a custom marker |
 | `enforce_bugfix_ledger` | `true` | Set `false` for repos without a `BUGFIXES.md` convention |
-| `model` | `claude-sonnet-4-20250514` | To bump the Claude model for a specific repo |
+| `model` | `claude-sonnet-4-6` | To pin a different Claude model for a specific repo. The default tracks the current Sonnet; avoid pinning a dated snapshot as the fleet default (a retired snapshot fails closed to HIGH everywhere). |
 | `max_tokens` | `1024` | Rarely |
 
 Secret: `ANTHROPIC_API_KEY` (declared `required: false` so a missing key fails
