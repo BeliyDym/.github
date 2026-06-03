@@ -46,18 +46,19 @@ Create `.github/workflows/ai-review.yml` in the consuming repo:
 ```yaml
 name: AI Review
 
+# Triggered on the PULL-REQUEST lifecycle, not on raw pushes. The Claude
+# reviewer posts to an existing PR, so it must run when the PR is opened
+# (`opened`/`reopened`) and on every new commit (`synchronize`). A `push`-only
+# trigger silently skips the review on the common "push branch, then open PR"
+# flow — opening a PR is not a push event, so the reviewer would never fire for
+# that PR. `synchronize` already covers push-to-an-open-PR, so this single
+# block is complete. (Council 3/3 → A, OST-626 audits/ost626-trigger-design.)
 on:
-  push:
-    branches:
-      - 'fix/**'
-      - 'feat/**'
-      - 'sprint/**'
-      - 'docs/**'
-      - 'chore/**'
-      - 'hotfix/**'
+  pull_request:
+    types: [opened, reopened, synchronize]
 
 concurrency:
-  group: ai-review-${{ github.ref }}
+  group: ai-review-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -78,6 +79,18 @@ jobs:
 **Always pin `@v1`** (an immutable tag), never `@main`. A bad edit to a
 floating `@main` would hit every repo at once; the tag is the blast-radius
 firewall.
+
+> **Why `pull_request`, not `push`?** The reusable workflow keys off an
+> existing open PR (it posts/labels the PR). A `push`-only caller misses the
+> "push the branch, then open the PR" flow — the pre-PR push finds no PR and
+> exits, and opening the PR is not a `push` event, so the Claude lens never
+> fires for that PR (Gemini + Copilot Apps still do, so the PR isn't
+> unreviewed — but the only fail-closed, secret-redacting lens is silently
+> absent). `pull_request: [opened, reopened, synchronize]` is GitHub's
+> canonical PR-review trigger (`github/codeql-action`, `anthropics/claude-code-action`)
+> and the reusable workflow is event-aware on both `push` and `pull_request`,
+> so a repo that prefers a `push` trigger still works — but `pull_request` is
+> the recommended default and closes the coverage gap.
 
 ### 2. Add the `ANTHROPIC_API_KEY` secret
 
