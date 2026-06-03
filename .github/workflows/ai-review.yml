@@ -293,7 +293,12 @@ jobs:
           # Stripe keys
           sed -i 's/[sp]k_\(live\|test\)_[a-zA-Z0-9]\{24,\}/[REDACTED_STRIPE_KEY]/g' /tmp/patch.txt
 
-          # Supabase JWTs
+          # Supabase / JWT tokens. A real JWT is three base64url segments
+          # joined by dots (header.payload.signature); the header alone is
+          # ~36 chars, so a single-segment {100,} rule misses standard JWTs
+          # and leaks the signature. Match the full dotted token first, then
+          # keep the long single-segment rule as a fallback for dotless blobs.
+          sed -i 's/eyJ[a-zA-Z0-9_-]\{1,\}\.[a-zA-Z0-9_-]\{1,\}\.[a-zA-Z0-9_-]\{1,\}/[REDACTED_JWT]/g' /tmp/patch.txt
           sed -i 's/eyJ[a-zA-Z0-9_-]\{100,\}/[REDACTED_JWT]/g' /tmp/patch.txt
 
           # AWS access keys
@@ -311,7 +316,11 @@ jobs:
       # ============================================
       - name: AI Code Review
         id: ai_review
-        if: steps.sensitive.outputs.found != 'true' && steps.bugfix_gate.outputs.ledger_missing != 'true'
+        # Gate the metered Anthropic call on an open PR existing: pushes to the
+        # trigger branches before a PR is opened would otherwise spend tokens on
+        # a review that PHASE 6 then discards. No PR => no review to post => no
+        # reason to pay for one.
+        if: steps.check_pr.outputs.exists == 'true' && steps.sensitive.outputs.found != 'true' && steps.bugfix_gate.outputs.ledger_missing != 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PROJECT_LABEL: ${{ steps.cfg.outputs.project_label }}
