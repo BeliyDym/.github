@@ -84,10 +84,14 @@ jobs:
         env:
           IN_PROJECT_LABEL: ${{ inputs.project_label }}
           IN_BOT_MARKER: ${{ inputs.bot_marker }}
+          # Route repo name + base branch through env: (not inline ${{ }}) so a
+          # crafted repo/branch name can't break out of the run: script.
+          REPO_NAME: ${{ github.event.repository.name }}
+          IN_BASE_BRANCH: ${{ inputs.base_branch }}
         run: |
           # project_label defaults to the repository name
           if [ -z "$IN_PROJECT_LABEL" ]; then
-            PROJECT_LABEL="${{ github.event.repository.name }}"
+            PROJECT_LABEL="$REPO_NAME"
           else
             PROJECT_LABEL="$IN_PROJECT_LABEL"
           fi
@@ -96,13 +100,13 @@ jobs:
           # bot_marker defaults to a repo-scoped marker so two repos never share
           # a marker (prevents cross-repo comment-collision on org-wide bots)
           if [ -z "$IN_BOT_MARKER" ]; then
-            SAFE_REPO=$(echo "${{ github.event.repository.name }}" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')
+            SAFE_REPO=$(echo "$REPO_NAME" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')
             BOT_MARKER="<!-- AI_REVIEW_BOT_${SAFE_REPO}_v1 -->"
           else
             BOT_MARKER="$IN_BOT_MARKER"
           fi
           echo "bot_marker=$BOT_MARKER" >> $GITHUB_OUTPUT
-          echo "::notice::project_label=$PROJECT_LABEL bot_marker=$BOT_MARKER base_branch=${{ inputs.base_branch }}"
+          echo "::notice::project_label=$PROJECT_LABEL bot_marker=$BOT_MARKER base_branch=$IN_BASE_BRANCH"
 
       # ============================================
       # PHASE 1: Checkout and fetch base branch
@@ -114,8 +118,9 @@ jobs:
 
       - name: Fetch base branch explicitly
         id: fetch_base
+        env:
+          BASE: ${{ inputs.base_branch }}
         run: |
-          BASE="${{ inputs.base_branch }}"
           git fetch origin "$BASE":refs/remotes/origin/"$BASE"
           echo "base_sha=$(git rev-parse origin/"$BASE")" >> $GITHUB_OUTPUT
 
@@ -236,9 +241,13 @@ jobs:
         id: bugfix_gate
         env:
           ENFORCE_LEDGER: ${{ inputs.enforce_bugfix_ledger }}
+          # github.ref_name is attacker-controllable (a PR author picks the
+          # branch name). Routing it through env: hands bash a literal string
+          # instead of interpolating it into the run: script text, so a branch
+          # like `fix/$(id)` can never execute. See GitHub's script-injection
+          # hardening guidance.
+          BRANCH: ${{ github.ref_name }}
         run: |
-          BRANCH="${{ github.ref_name }}"
-
           # Detect if this is a fix/* branch
           if [[ "$BRANCH" == fix/* ]]; then
             echo "is_bugfix=true" >> $GITHUB_OUTPUT
@@ -326,11 +335,14 @@ jobs:
           PROJECT_LABEL: ${{ steps.cfg.outputs.project_label }}
           MODEL: ${{ inputs.model }}
           MAX_TOKENS: ${{ inputs.max_tokens }}
+          # diffstat embeds changed-file paths a PR author controls; a file named
+          # `$(id).txt` would execute if interpolated inline. env: passes it as a
+          # literal. truncated/file_count are workflow-computed but routed the
+          # same way for consistency.
+          DIFFSTAT: ${{ steps.diff.outputs.diffstat }}
+          TRUNCATED: ${{ steps.diff.outputs.truncated }}
+          FILE_COUNT: ${{ steps.diff.outputs.file_count }}
         run: |
-          DIFFSTAT="${{ steps.diff.outputs.diffstat }}"
-          TRUNCATED="${{ steps.diff.outputs.truncated }}"
-          FILE_COUNT="${{ steps.diff.outputs.file_count }}"
-
           # Fail-closed if the key is absent (reusable workflow declares the
           # secret required:false; a repo that hasn't added ANTHROPIC_API_KEY
           # must NOT silent-pass — force HIGH + manual review).
@@ -468,25 +480,37 @@ jobs:
       # ============================================
       - name: Skip if no PR exists
         if: steps.check_pr.outputs.exists != 'true'
+        env:
+          BASE_BRANCH: ${{ inputs.base_branch }}
         run: |
           echo "No open PR found for this branch. Skipping review."
-          echo "Create a PR manually with: gh pr create --base ${{ inputs.base_branch }}"
+          echo "Create a PR manually with: gh pr create --base $BASE_BRANCH"
 
       - name: Post review comment to existing PR
         if: steps.check_pr.outputs.exists == 'true'
         uses: actions/github-script@v7
+        # All dynamic values are passed through env: and read via process.env
+        # below — never interpolated as ${{ }} directly into the JS source.
+        # Inline interpolation into a github-script body is the JS-context twin
+        # of shell script-injection (CWE-94); env: makes it safe-by-construction
+        # even if a future edit repoints one of these to a user-controlled value.
         env:
           BOT_MARKER: ${{ steps.cfg.outputs.bot_marker }}
           PROJECT_LABEL: ${{ steps.cfg.outputs.project_label }}
+          PR_NUMBER: ${{ steps.check_pr.outputs.pr_number }}
+          TRUNCATED: ${{ steps.diff.outputs.truncated }}
+          IS_BUGFIX: ${{ steps.bugfix_gate.outputs.is_bugfix }}
+          LEDGER_MISSING: ${{ steps.bugfix_gate.outputs.ledger_missing }}
+          QA_MISSING: ${{ steps.bugfix_gate.outputs.qa_missing }}
         with:
           script: |
             const fs = require('fs');
-            const prNumber = ${{ steps.check_pr.outputs.pr_number }};
+            const prNumber = parseInt(process.env.PR_NUMBER, 10);
             const review = JSON.parse(fs.readFileSync('/tmp/review.json', 'utf8'));
-            const truncated = '${{ steps.diff.outputs.truncated }}' === 'true';
-            const isBugfix = '${{ steps.bugfix_gate.outputs.is_bugfix }}' === 'true';
-            const ledgerMissing = '${{ steps.bugfix_gate.outputs.ledger_missing }}' === 'true';
-            const qaMissing = '${{ steps.bugfix_gate.outputs.qa_missing }}' === 'true';
+            const truncated = process.env.TRUNCATED === 'true';
+            const isBugfix = process.env.IS_BUGFIX === 'true';
+            const ledgerMissing = process.env.LEDGER_MISSING === 'true';
+            const qaMissing = process.env.QA_MISSING === 'true';
 
             const BOT_MARKER = process.env.BOT_MARKER;
             const PROJECT_LABEL = process.env.PROJECT_LABEL;
@@ -549,15 +573,23 @@ jobs:
       - name: Apply risk labels
         if: steps.check_pr.outputs.exists == 'true'
         uses: actions/github-script@v7
+        # Dynamic values pass through env: and are read via process.env — never
+        # interpolated as ${{ }} into the JS source (CWE-94 safe-by-construction).
+        env:
+          PR_NUMBER: ${{ steps.check_pr.outputs.pr_number }}
+          SENSITIVE: ${{ steps.sensitive.outputs.found }}
+          PARSE_FAILED: ${{ steps.ai_review.outputs.parse_failed }}
+          TRUNCATED: ${{ steps.diff.outputs.truncated }}
+          LEDGER_MISSING: ${{ steps.bugfix_gate.outputs.ledger_missing }}
         with:
           script: |
             const fs = require('fs');
-            const prNumber = '${{ steps.check_pr.outputs.pr_number }}';
+            const prNumber = parseInt(process.env.PR_NUMBER, 10);
             const review = JSON.parse(fs.readFileSync('/tmp/review.json', 'utf8'));
-            const sensitive = '${{ steps.sensitive.outputs.found }}' === 'true';
-            const parseFailed = '${{ steps.ai_review.outputs.parse_failed }}' === 'true';
-            const truncated = '${{ steps.diff.outputs.truncated }}' === 'true';
-            const ledgerMissing = '${{ steps.bugfix_gate.outputs.ledger_missing }}' === 'true';
+            const sensitive = process.env.SENSITIVE === 'true';
+            const parseFailed = process.env.PARSE_FAILED === 'true';
+            const truncated = process.env.TRUNCATED === 'true';
+            const ledgerMissing = process.env.LEDGER_MISSING === 'true';
 
             // HYGIENE: Remove ALL existing risk/status labels first
             const { data: currentLabels } = await github.rest.issues.listLabelsOnIssue({
