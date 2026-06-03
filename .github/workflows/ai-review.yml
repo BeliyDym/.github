@@ -404,14 +404,20 @@ jobs:
           SYSTEM_MSG="You are a code review bot for ${PROJECT_LABEL}. Return ONLY a raw JSON object with no markdown fences, no explanation, no commentary. Just the JSON."
           PAYLOAD=$(jq -Rs --arg sys "$SYSTEM_MSG" --arg model "$MODEL" --argjson maxtok "$MAX_TOKENS" '{model: $model, max_tokens: $maxtok, system: $sys, messages: [{role: "user", content: .}]}' /tmp/prompt.txt)
 
-          # Capture HTTP status code and curl exit code for debugging
+          # Capture HTTP status code and curl exit code for debugging.
+          # Disable errexit around the curl so a transport-layer failure (timeout,
+          # DNS/TLS error, connection reset) does NOT abort the step under `bash -e`
+          # before CURL_EXIT is captured — otherwise the fail-closed branch below
+          # never runs and the job dies with no HIGH/needs-human-review result.
+          # `set +e` (not `|| true`) so $? still reflects curl's real exit code.
+          set +e
           HTTP_CODE=$(curl -s -w "%{http_code}" --max-time 60 -X POST https://api.anthropic.com/v1/messages \
             -H "Content-Type: application/json" \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -d "$PAYLOAD" -o /tmp/api_response.json)
-
           CURL_EXIT=$?
+          set -e
           echo "::notice::API call completed. HTTP status: $HTTP_CODE, curl exit: $CURL_EXIT"
 
           if [ "$CURL_EXIT" -ne 0 ] || [ "$HTTP_CODE" != "200" ]; then
