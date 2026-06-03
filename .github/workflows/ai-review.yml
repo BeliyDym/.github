@@ -487,10 +487,17 @@ jobs:
             fi
           fi
 
-          RISK=$(jq -r '.risk' /tmp/review.json)
-          SUMMARY=$(jq -r '.summary' /tmp/review.json)
-          echo "risk=$RISK" >> $GITHUB_OUTPUT
-          echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
+          # NOTE: risk/summary are intentionally NOT exported to $GITHUB_OUTPUT.
+          # PHASE 6/7 read them straight from /tmp/review.json (JSON.parse), so
+          # an `echo "summary=$SUMMARY" >> $GITHUB_OUTPUT` here would be a dead
+          # write — and a dangerous one: an AI `summary` containing a newline
+          # (jq -r expands a JSON \n to a real newline) corrupts the key=value
+          # output file, the runner rejects it, the step fails, and the
+          # fail-closed comment/label steps (gated on success, not always())
+          # get skipped → silent-pass via job failure. Only `parse_failed`
+          # (a bare true/false token, written above) is exported, because it
+          # IS read by PHASE 7. Keep risk/summary file-only.
+          echo "::notice::Review risk: $(jq -r '.risk' /tmp/review.json)"
 
       # ============================================
       # PHASE 6: Post Review to PR (review-only, no PR creation)
