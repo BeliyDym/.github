@@ -1,9 +1,9 @@
-# Reusable AI PR-review workflow (Claude self-hosted, secret-redacting, fail-closed).
+# Reusable AI PR-review workflow (OpenRouter metered, secret-redacting, fail-closed).
 #
 # Canonical single-source for the BeliyDym multi-vendor AI PR-audit rollout
 # (OST-626, IRON Council 3/3 Q1=C Q2=C Q3=C). Extracted from FE8's proven
 # fe8-review-bot.yml (Sprint 256). Edit here once; every consuming repo that
-# pins `uses: BeliyDym/.github/.github/workflows/ai-review.yml@v1` inherits it.
+# pins `uses: BeliyDym/.github/.github/workflows/ai-review.yml@v2` inherits it.
 #
 # This file is ONE of three AI reviewers per the rollout. The other two are
 # GitHub Apps configured per-repo (Gemini Code Assist via .gemini/, GitHub
@@ -16,10 +16,10 @@
 #   - Anti-spoof: only update a comment authored by github-actions[bot] carrying
 #     this repo's bot marker.
 #   - Label hygiene: strip stale managed labels before applying fresh ones.
-#   - Missing ANTHROPIC_API_KEY => HIGH + needs-human-review (never silent-pass).
+#   - Missing OPENROUTER_API_KEY => HIGH + needs-human-review (never silent-pass).
 #
 # CALLER CONTRACT: the consuming repo owns the `on:` trigger, `concurrency`,
-# and `permissions`, and passes ANTHROPIC_API_KEY through `secrets:`. See the
+# and `permissions`, and passes OPENROUTER_API_KEY through `secrets:`. See the
 # org README for the 3-line caller snippet.
 
 name: AI Review (reusable)
@@ -53,22 +53,18 @@ on:
         required: false
         default: true
       model:
-        description: 'Anthropic model id for the review call. Default is the current Sonnet (claude-sonnet-4-6). Do not pin a dated snapshot here as the fleet default — a retired snapshot would make every consuming repo hit the API-error path and force HIGH, disabling the reviewer fleet-wide.'
+        description: 'OpenRouter model id for the review call. Default is the stable DeepSeek chat route.'
         type: string
         required: false
-        # claude-sonnet-4-6 is the current, non-deprecated Sonnet. The previous
-        # default (claude-sonnet-4-20250514, inherited from FE8) is on
-        # Anthropic's deprecation schedule (retires 2026-06-15); after that,
-        # every repo on the default would fail the call and fail closed to HIGH.
-        default: 'claude-sonnet-4-6'
+        default: 'deepseek/deepseek-chat'
       max_tokens:
-        description: 'max_tokens for the Anthropic call.'
+        description: 'max_tokens for the OpenRouter call.'
         type: number
         required: false
         default: 1024
     secrets:
-      ANTHROPIC_API_KEY:
-        description: 'Anthropic API key. Declared required:false so a missing key fails CLOSED (HIGH + needs-human-review) instead of erroring at the call boundary.'
+      OPENROUTER_API_KEY:
+        description: 'OpenRouter API key. Declared required:false so a missing key fails CLOSED (HIGH + needs-human-review) instead of erroring at the call boundary.'
         required: false
 
 jobs:
@@ -369,13 +365,13 @@ jobs:
       # ============================================
       - name: AI Code Review
         id: ai_review
-        # Gate the metered Anthropic call on an open PR existing: pushes to the
+        # Gate the metered OpenRouter call on an open PR existing: pushes to the
         # trigger branches before a PR is opened would otherwise spend tokens on
         # a review that PHASE 6 then discards. No PR => no review to post => no
         # reason to pay for one.
         if: steps.check_pr.outputs.exists == 'true' && steps.sensitive.outputs.found != 'true' && steps.bugfix_gate.outputs.ledger_missing != 'true'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PROJECT_LABEL: ${{ steps.cfg.outputs.project_label }}
           MODEL: ${{ inputs.model }}
           MAX_TOKENS: ${{ inputs.max_tokens }}
@@ -388,14 +384,14 @@ jobs:
           FILE_COUNT: ${{ steps.diff.outputs.file_count }}
         run: |
           # Fail-closed if the key is absent (reusable workflow declares the
-          # secret required:false; a repo that hasn't added ANTHROPIC_API_KEY
+          # secret required:false; a repo that hasn't added OPENROUTER_API_KEY
           # must NOT silent-pass — force HIGH + manual review).
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::error::ANTHROPIC_API_KEY not provided to reusable workflow — failing closed (HIGH)."
-            echo '{"risk":"HIGH","summary":"AI review skipped - ANTHROPIC_API_KEY not configured for this repo","issues":["Add the ANTHROPIC_API_KEY repository secret to enable the Claude reviewer"],"recommendation":"REQUEST_CHANGES"}' > /tmp/review.json
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::OPENROUTER_API_KEY not provided to reusable workflow — failing closed (HIGH)."
+            echo '{"risk":"HIGH","summary":"AI review skipped - OPENROUTER_API_KEY not configured for this repo","issues":["Add the OPENROUTER_API_KEY repository secret to enable the OpenRouter reviewer"],"recommendation":"REQUEST_CHANGES"}' > /tmp/review.json
             echo "parse_failed=true" >> $GITHUB_OUTPUT
             echo "risk=HIGH" >> $GITHUB_OUTPUT
-            echo "summary=AI review skipped - ANTHROPIC_API_KEY not configured" >> $GITHUB_OUTPUT
+            echo "summary=AI review skipped - OPENROUTER_API_KEY not configured" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -433,9 +429,9 @@ jobs:
           PROMPT_SIZE=$(wc -c < /tmp/prompt.txt)
           echo "::notice::Prompt size: ${PROMPT_SIZE} chars"
 
-          # Build JSON payload with system message for reliable JSON output
+          # Build OpenRouter chat-completions payload with system message for reliable JSON output
           SYSTEM_MSG="You are a code review bot for ${PROJECT_LABEL}. Return ONLY a raw JSON object with no markdown fences, no explanation, no commentary. Just the JSON."
-          PAYLOAD=$(jq -Rs --arg sys "$SYSTEM_MSG" --arg model "$MODEL" --argjson maxtok "$MAX_TOKENS" '{model: $model, max_tokens: $maxtok, system: $sys, messages: [{role: "user", content: .}]}' /tmp/prompt.txt)
+          PAYLOAD=$(jq -Rs --arg sys "$SYSTEM_MSG" --arg model "$MODEL" --argjson maxtok "$MAX_TOKENS" '{model: $model, max_tokens: $maxtok, temperature: 0, messages: [{role: "system", content: $sys}, {role: "user", content: .}]}' /tmp/prompt.txt)
 
           # Capture HTTP status code and curl exit code for debugging.
           # Disable errexit around the curl so a transport-layer failure (timeout,
@@ -444,10 +440,11 @@ jobs:
           # never runs and the job dies with no HIGH/needs-human-review result.
           # `set +e` (not `|| true`) so $? still reflects curl's real exit code.
           set +e
-          HTTP_CODE=$(curl -s -w "%{http_code}" --max-time 60 -X POST https://api.anthropic.com/v1/messages \
+          HTTP_CODE=$(curl -s -w "%{http_code}" --max-time 60 -X POST https://openrouter.ai/api/v1/chat/completions \
             -H "Content-Type: application/json" \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+            -H "HTTP-Referer: https://github.com/${GITHUB_REPOSITORY}" \
+            -H "X-Title: BeliyDym AI PR Review" \
             -d "$PAYLOAD" -o /tmp/api_response.json)
           CURL_EXIT=$?
           set -e
@@ -473,7 +470,7 @@ jobs:
           else
             RESPONSE=$(cat /tmp/api_response.json)
             # Non-fatal jq extraction (survives set -e if response is not JSON)
-            REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // empty' 2>/dev/null || true)
+            REVIEW=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
 
             # Defense 1: Strip markdown code fences (preserve internal newlines, only trim edges)
             REVIEW=$(echo "$REVIEW" | sed '1s/^```json[[:space:]]*//; 1s/^```[[:space:]]*//; $s/[[:space:]]*```$//')
