@@ -565,21 +565,47 @@ jobs:
           PROJECT_LABEL: ${{ steps.cfg.outputs.project_label }}
           PR_NUMBER: ${{ steps.check_pr.outputs.pr_number }}
           TRUNCATED: ${{ steps.diff.outputs.truncated }}
+          SENSITIVE: ${{ steps.sensitive.outputs.found }}
+          PARSE_FAILED: ${{ steps.ai_review.outputs.parse_failed }}
           IS_BUGFIX: ${{ steps.bugfix_gate.outputs.is_bugfix }}
           LEDGER_MISSING: ${{ steps.bugfix_gate.outputs.ledger_missing }}
           QA_MISSING: ${{ steps.bugfix_gate.outputs.qa_missing }}
+          BASE_SHA: ${{ steps.fetch_base.outputs.base_sha }}
+          MODEL: ${{ inputs.model }}
         with:
           script: |
             const fs = require('fs');
             const prNumber = parseInt(process.env.PR_NUMBER, 10);
             const review = JSON.parse(fs.readFileSync('/tmp/review.json', 'utf8'));
             const truncated = process.env.TRUNCATED === 'true';
+            const sensitive = process.env.SENSITIVE === 'true';
+            const parseFailed = process.env.PARSE_FAILED === 'true';
             const isBugfix = process.env.IS_BUGFIX === 'true';
             const ledgerMissing = process.env.LEDGER_MISSING === 'true';
             const qaMissing = process.env.QA_MISSING === 'true';
 
             const BOT_MARKER = process.env.BOT_MARKER;
             const PROJECT_LABEL = process.env.PROJECT_LABEL;
+            const headSha = context.payload.pull_request?.head?.sha || context.sha || '';
+            const baseSha = context.payload.pull_request?.base?.sha || process.env.BASE_SHA || '';
+
+            const effectiveRisk = (
+              sensitive || parseFailed || ledgerMissing || review.risk === 'HIGH'
+            ) ? 'HIGH' : (review.risk === 'MEDIUM' ? 'MEDIUM' : 'LOW');
+            const signalLabels = [];
+            if (effectiveRisk === 'HIGH') {
+              signalLabels.push('risk:high', 'needs-human-review');
+            } else if (effectiveRisk === 'MEDIUM') {
+              signalLabels.push('risk:medium');
+            } else {
+              signalLabels.push('risk:low');
+            }
+            if (ledgerMissing) {
+              signalLabels.push('needs-bugfix-ledger');
+            }
+            if (truncated) {
+              signalLabels.push('partial-review');
+            }
 
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
@@ -601,6 +627,35 @@ jobs:
               body += `**PARTIAL REVIEW** - Patch was truncated\n\n`;
             }
             body += `**Risk Level:** ${review.risk}\n**Summary:** ${review.summary}\n\n`;
+
+            const signal = {
+              schema_version: 1,
+              source: {
+                provider: 'github_actions',
+                workflow: 'BeliyDym/.github/.github/workflows/ai-review.yml@v2',
+                reviewer: 'openrouter',
+                model: process.env.MODEL
+              },
+              repo: `${context.repo.owner}/${context.repo.repo}`,
+              pr_number: prNumber,
+              head_sha: headSha,
+              base_sha: baseSha,
+              risk: effectiveRisk,
+              summary: String(review.summary || 'unverified'),
+              labels: signalLabels,
+              marker: BOT_MARKER,
+              observed_reviewers: {
+                github_actions: 'observed',
+                gemini: 'not_observed',
+                copilot: 'not_observed'
+              },
+              workflow_run_url: `${context.serverUrl || 'https://github.com'}/${context.repo.owner}/${context.repo.repo}/actions/runs/${process.env.GITHUB_RUN_ID}`
+            };
+            const signalJson = JSON.stringify(signal)
+              .replace(/</g, '\\u003c')
+              .replace(/>/g, '\\u003e')
+              .replace(/-/g, '\\u002d');
+            body += `<!-- AI_REVIEW_SIGNAL_V1\n${signalJson}\nAI_REVIEW_SIGNAL_V1 -->\n\n`;
 
             // BUGFIX PROTOCOL for fix/* branches
             if (isBugfix) {

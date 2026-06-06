@@ -19,7 +19,7 @@ each from a different model lineage so a blind spot in one is caught by another
 | Reviewer | Lineage | How it's wired | Cost / secret |
 |---|---|---|---|
 | **Gemini Code Assist** | Google | GitHub App + per-repo `.gemini/config.yaml` + `.gemini/styleguide.md` | Free app, no secret |
-| **Claude review bot** | Anthropic | **This reusable workflow** (`workflow_call`), called from each repo | Metered — needs `ANTHROPIC_API_KEY` repo secret |
+| **Claude review bot** | Anthropic-compatible route via OpenRouter | **This reusable workflow** (`workflow_call`), called from each repo | Metered — needs `OPENROUTER_API_KEY` repo secret |
 | **GitHub Copilot** | Microsoft / GitHub | Native `copilot-pull-request-reviewer` App, zero config | Free app, no secret |
 
 > The OpenAI Codex connector (`chatgpt-codex-connector`) is **intentionally
@@ -63,7 +63,7 @@ concurrency:
 
 jobs:
   ai-review:
-    uses: BeliyDym/.github/.github/workflows/ai-review.yml@v1
+    uses: BeliyDym/.github/.github/workflows/ai-review.yml@v2
     permissions:
       contents: read
       pull-requests: write
@@ -73,10 +73,10 @@ jobs:
       # base_branch: "master"          # ONLY if the repo's default branch is master
       # enforce_bugfix_ledger: false   # set false unless the repo keeps a BUGFIXES.md ledger
     secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
-**Always pin `@v1`** (an immutable tag), never `@main`. A bad edit to a
+**Always pin `@v2`** (an immutable tag), never `@main`. A bad edit to a
 floating `@main` would hit every repo at once; the tag is the blast-radius
 firewall.
 
@@ -92,11 +92,11 @@ firewall.
 > so a repo that prefers a `push` trigger still works — but `pull_request` is
 > the recommended default and closes the coverage gap.
 
-### 2. Add the `ANTHROPIC_API_KEY` secret
+### 2. Add the `OPENROUTER_API_KEY` secret
 
 Repo → Settings → Secrets and variables → Actions → New repository secret:
-`ANTHROPIC_API_KEY`. **This is SJ-owned** — if you don't have it, request it;
-do not invent one. Without it the Claude reviewer fails *closed* (posts HIGH +
+`OPENROUTER_API_KEY`. **This is SJ-owned** — if you don't have it, request it;
+do not invent one. Without it the reviewer fails *closed* (posts HIGH +
 `needs-human-review`), it never silent-passes.
 
 ### 3. Add the Gemini config (per-repo, tuned to the stack)
@@ -124,10 +124,10 @@ was previously installed.
 | `project_label` | repo name | Always set it to a human label for a better review prompt |
 | `bot_marker` | `<!-- AI_REVIEW_BOT_<REPO>_v1 -->` | Rarely — only if a repo needs a custom marker |
 | `enforce_bugfix_ledger` | `true` | Set `false` for repos without a `BUGFIXES.md` convention |
-| `model` | `claude-sonnet-4-6` | To pin a different Claude model for a specific repo. The default tracks the current Sonnet; avoid pinning a dated snapshot as the fleet default (a retired snapshot fails closed to HIGH everywhere). |
+| `model` | `deepseek/deepseek-chat` | To pin a different OpenRouter model for a specific repo. Avoid pinning a dated retired snapshot as the fleet default; a retired model fails closed to HIGH everywhere. |
 | `max_tokens` | `1024` | Rarely |
 
-Secret: `ANTHROPIC_API_KEY` (declared `required: false` so a missing key fails
+Secret: `OPENROUTER_API_KEY` (declared `required: false` so a missing key fails
 closed rather than erroring at the call boundary).
 
 ---
@@ -152,7 +152,7 @@ The reusable workflow preserves, from FE8's reference `fe8-review-bot.yml`:
   as `$VAR` / `process.env`, never interpolated as `${{ }}` into `run:` shell text
   or `actions/github-script` JS source. An attacker-named branch (`fix/$(id)`) or
   changed-file path (`$(id).txt`) cannot execute in the runner (CWE-94), which
-  matters because `ANTHROPIC_API_KEY` is in scope.
+  matters because `OPENROUTER_API_KEY` is in scope.
 - **Fail-closed** — API error, parse failure, missing key, OR a response whose
   `risk` is not exactly `HIGH`/`MEDIUM`/`LOW` → HIGH + `needs-human-review`.
   Never silent-pass (a malformed-but-valid-JSON response cannot downgrade to
@@ -170,11 +170,52 @@ The reusable workflow preserves, from FE8's reference `fe8-review-bot.yml`:
 
 ---
 
+## Multica signal contract
+
+The PR comment also carries a hidden machine-readable block:
+
+```text
+<!-- AI_REVIEW_SIGNAL_V1
+{...schema-v1 JSON...}
+AI_REVIEW_SIGNAL_V1 -->
+```
+
+Multica's GitHub PR autopilot treats `pull_request.labeled` events from
+`github-actions[bot]` with a managed `risk:*` label as AI-review signals. It
+fetches the marker-stable bot comment, extracts the hidden block when present,
+and normalizes it to `ai_pr_audit_signal` metadata:
+
+| Field | Meaning |
+|---|---|
+| `schema_version` | Currently `1`; bump only for incompatible changes |
+| `source` | Provider/workflow/reviewer/model that produced the signal |
+| `repo`, `pr_number`, `head_sha`, `base_sha` | PR identity and commit boundary |
+| `risk` | Effective risk after fail-closed gates (`HIGH`, `MEDIUM`, `LOW`) |
+| `summary` | Bot summary; `unverified` if no trustworthy comment data exists |
+| `labels` | Managed labels the workflow intended to apply |
+| `marker` | Repo-scoped bot marker used for comment identity |
+| `observed_reviewers` | Observed/not-observed reviewer breakdown; do not invent Gemini/Copilot details |
+| `workflow_run_url` | Best-effort link to the producing Actions run |
+
+Multica computes `ai_review_key = sha256(repo + ':' + pr_number + ':' +
+head_sha + ':' + marker)` and uses it for idempotency. A duplicate webhook with
+the same key should update the canonical issue and cancel the duplicate; it
+must not create a second live audit record.
+
+GitHub labels are inputs, not final gate authority. `risk:high` requests or
+updates the Multica premerge gate; it cannot approve or close a PR by itself.
+
+---
+
 ## Rollback
 
 - **Per repo:** delete `.github/workflows/ai-review.yml`, delete `.gemini/` (if
-  newly added), remove the `ANTHROPIC_API_KEY` secret. The reviewers stop; no
+  newly added), remove the `OPENROUTER_API_KEY` secret. The reviewers stop; no
   other repo is affected.
+- **Signal bridge:** remove the hidden `AI_REVIEW_SIGNAL_V1` block from the
+  reusable workflow comment body and revert the Multica autopilot prompt to
+  ignore `pull_request.labeled` events. Visible comments and labels keep
+  working.
 - **Central:** keep old tags for audit history; ship a **new** tag (`v2`) and
   bump consumers deliberately — never silently move `v1`.
 - **FE8** is the golden reference and stays on its in-repo `fe8-review-bot.yml`;
